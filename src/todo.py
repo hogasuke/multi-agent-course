@@ -41,5 +41,15 @@ class TodoList:
             self._items.remove(item)
         return item
 
+    def __str__(self) -> str:
+        """TodoListの中身を文字列で返す"""
+        if not self._items:
+            return "TodoList: (空)"
+        lines = [f"TodoList ({len(self._items)}件):"]
+        for item in self._items:
+            mark = "☑️" if item.completed else "  "
+            lines.append(f"  {mark} [{item.id}] {item.title}")
+        return "\n".join(lines)
+
     def _find(self, todo_id: int) -> Optional[TodoItem]:
         return next((item for item in self._items if item.id == todo_id), None)
