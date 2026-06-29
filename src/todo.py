@@ -47,7 +47,7 @@ class TodoList:
             return "TodoList: (空)"
         lines = [f"TodoList ({len(self._items)}件):"]
         for item in self._items:
-            mark = "☑️" if item.completed else "  "
+            mark = "✔︎" if item.completed else "  "
             lines.append(f"  {mark} [{item.id}] {item.title}")
         return "\n".join(lines)
 
