@@ -7,6 +7,7 @@ class TodoItem:
     id: int
     title: str
     completed: bool = False
+    category: Optional[str] = None
 
 
 class TodoList:
@@ -16,9 +17,9 @@ class TodoList:
         self._items: list[TodoItem] = []
         self._next_id: int = 1
 
-    def add(self, title: str) -> TodoItem:
+    def add(self, title: str, category: Optional[str] = None) -> TodoItem:
         """新しいTodoを追加する"""
-        item = TodoItem(id=self._next_id, title=title)
+        item = TodoItem(id=self._next_id, title=title, category=category)
         self._items.append(item)
         self._next_id += 1
         return item
@@ -26,6 +27,10 @@ class TodoList:
     def list_all(self) -> list[TodoItem]:
         """全Todoを返す"""
         return list(self._items)
+
+    def list_by_category(self, category: str) -> list[TodoItem]:
+        """指定カテゴリのTodoを返す"""
+        return [item for item in self._items if item.category == category]
 
     def complete(self, todo_id: int) -> Optional[TodoItem]:
         """指定IDのTodoを完了済みにする。見つからない場合はNoneを返す"""
@@ -48,7 +53,8 @@ class TodoList:
         lines = [f"TodoList ({len(self._items)}件):"]
         for item in self._items:
             mark = "✔︎" if item.completed else "  "
-            lines.append(f"  {mark} [{item.id}] {item.title}")
+            category_str = f" [{item.category}]" if item.category else ""
+            lines.append(f"  {mark} [{item.id}] {item.title}{category_str}")
         return "\n".join(lines)
 
     def _find(self, todo_id: int) -> Optional[TodoItem]:
