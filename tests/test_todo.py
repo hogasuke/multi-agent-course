@@ -200,6 +200,15 @@ class TestTodoListDelete:
         tl = TodoList()
         assert tl.delete(1) is None
 
+    def test_存在しないIDのdeleteはリストを変化させない(self):
+        """存在しないIDに対してdelete()を呼んでもリストの件数が変わらないことを確認する"""
+        tl = TodoList()
+        tl.add("タスク1")
+        tl.add("タスク2")
+        result = tl.delete(9999)
+        assert result is None
+        assert len(tl.list_all()) == 2
+
 
 class TestTodoCore:
     """正常系3ケース・異常系2ケースの基本動作テスト"""
