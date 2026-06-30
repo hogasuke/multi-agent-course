@@ -1,174 +1,209 @@
-# マルチエージェントコース
+# multi-agent-course
 
-Claude Codeのマルチエージェント機能を学習する実習プロジェクト。
-
----
+Claude Code のマルチエージェント機能を学習する実習プロジェクト。
+コアモジュールとして、JSONファイルを永続化ストレージとするTodo管理クラス `TodoList` を実装している。
 
 ## プロジェクト概要
 
-本プロジェクトは、Claude Codeが提供するマルチエージェント機能（コードレビュー、テスト生成、ドキュメント作成など）を実際に体験しながら学習するためのサンプルアプリケーションです。
+`src/todo.py` に実装された `TodoList` クラスは、以下の特徴を持つ。
 
-メインの実装として、JSONファイルを永続化ストレージとして使用するTodoリスト管理クラス（`TodoList`）を含んでいます。
+- 追加・完了・削除などの操作を行うたびに自動的にJSONファイルへ書き込む
+- プロセスを再起動してもデータが失われない永続化設計
+- ファイルが存在しない場合や破損している場合は空の状態で安全に起動する
+- 日本語タイトルを含むデータを正しく保存・読み込みできる
 
----
+## 機能一覧
 
-## 技術スタック
+| メソッド | 説明 |
+|---|---|
+| `add(title)` | 新しいTodoを追加する。タイトルの前後空白は自動除去。 |
+| `list_all()` | 全Todoのリストを返す（内部データのコピー）。 |
+| `complete(todo_id)` | 指定IDのTodoを完了状態にする。 |
+| `delete(todo_id)` | 指定IDのTodoを削除する。 |
+| `search(keyword)` | キーワードで部分一致検索する（大文字小文字を区別しない）。 |
+| `get_stats()` | 総数・完了数・未完了数・完了率の統計情報を返す。 |
 
-| 項目 | 内容 |
-|------|------|
-| 言語 | Python 3.14.2 |
-| パッケージ管理 | [uv](https://docs.astral.sh/uv/) |
-| テストフレームワーク | pytest |
-| Webフレームワーク | FastAPI |
+## セットアップ
 
----
-
-## セットアップ方法
-
-### 前提条件
-
-- Python 3.14.2 以上
-- uv がインストール済みであること
-
-uvのインストールは[公式ドキュメント](https://docs.astral.sh/uv/getting-started/installation/)を参照してください。
-
-### 手順
+Python 3.14 以上および [uv](https://docs.astral.sh/uv/) が必要。
 
 ```bash
-# リポジトリをクローン
+# リポジトリのクローン
 git clone <リポジトリURL>
 cd multi-agent-course
 
-# 依存パッケージをインストール
+# 依存関係のインストール
 uv sync
 ```
 
-> **注意:** `pip install` は使用しないこと。パッケージの追加は必ず `uv add <パッケージ名>` を使う。
-
----
-
 ## 使い方
 
-### TodoListクラスの基本的な使用例
+### 基本的な使用例
 
 ```python
 from src.todo import TodoList
 
-# インスタンス生成（JSONファイルが事前に存在している必要がある）
-tl = TodoList("todos.json")
+# インスタンス化（指定ファイルが存在すれば自動的に読み込む）
+todo_list = TodoList("todos.json")
 
-# タスクを追加する
-todo = tl.add("牛乳を買う")
-print(todo)
+# Todoを追加する
+item = todo_list.add("牛乳を買う")
+print(item)
 # {'id': 1, 'title': '牛乳を買う', 'done': False}
 
-# 全タスクを一覧取得する
-all_todos = tl.list_all()
+todo_list.add("Python学習")
+todo_list.add("レポートを提出する")
+```
 
-# タスクを完了にする
-tl.complete(todo["id"])
+### 一覧取得
 
-# タスクを検索する（大文字小文字を区別する）
-results = tl.search("買う")
+```python
+# 全件取得
+all_todos = todo_list.list_all()
+for todo in all_todos:
+    status = "完了" if todo["done"] else "未完了"
+    print(f"[{status}] {todo['id']}: {todo['title']}")
+```
 
-# タスクを削除する
-tl.delete(todo["id"])
+### 完了・削除
 
-# 統計情報を取得する（タスクが1件以上存在する場合のみ）
-stats = tl.get_stats()
+```python
+# IDを指定して完了状態にする
+result = todo_list.complete(1)
+print(result)
+# {'id': 1, 'title': '牛乳を買う', 'done': True}
+
+# 存在しないIDを指定するとNoneが返る
+print(todo_list.complete(999))
+# None
+
+# IDを指定して削除する（成功時はTrue、失敗時はFalse）
+print(todo_list.delete(2))
+# True
+```
+
+### 検索
+
+```python
+# 大文字小文字を区別せず部分一致で検索する
+results = todo_list.search("python")
+for todo in results:
+    print(todo["title"])
+# Python学習
+
+# 空文字を指定すると全件が返る
+all_results = todo_list.search("")
+```
+
+### 統計情報
+
+```python
+stats = todo_list.get_stats()
 print(stats)
-# {'total': 1, 'done': 1, 'pending': 0, 'rate': 1.0}
+# {'total': 2, 'done': 1, 'pending': 1, 'rate': 0.5}
+print(f"完了率: {stats['rate'] * 100:.1f}%")
+# 完了率: 50.0%
 ```
 
-スクリプトの実行には `uv run python` を使う。
-
-```bash
-uv run python main.py
-```
-
----
-
-## テスト実行方法
+## テスト実行
 
 ```bash
 uv run pytest
 ```
 
-詳細な出力を確認したい場合は `-v` オプションを付ける。
+詳細なログを確認したい場合は `-v` オプションを付ける。
 
 ```bash
 uv run pytest -v
 ```
 
-### テスト結果
+現在のテストスイートは37件のテストケースから構成される。
 
-| 項目 | 内容 |
-|------|------|
-| テストファイル | `tests/test_todo.py` |
-| テスト件数 | 29件（全件パス） |
-| カバー内容 | 正常系・異常系・エッジケース・境界値テスト |
+| テストクラス | 件数 | 検証内容 |
+|---|---|---|
+| TestLoad | 4件 | ファイル未存在・破損JSON・キー欠落・正常読み込み |
+| TestAdd | 8件 | 連番ID・空白trim・done初期値、異常系バリデーション |
+| TestListAll | 5件 | 空リスト・複数件・コピー確認・内部変更不可 |
+| TestComplete | 5件 | フラグ更新・再完了・存在しないID・負のID |
+| TestDelete | 5件 | 削除後の非存在・他データ残存・存在しないID |
+| TestSearch | 5件 | 部分一致・大文字小文字無視・空キーワード全件 |
+| TestGetStats | 5件 | rate計算・0件時のZeroDivisionError防止 |
 
-#### テストクラス一覧
+## データ形式
 
-| クラス名 | 対象メソッド | テスト件数 |
-|----------|-------------|------------|
-| `TestAdd` | `add()` | 4件 |
-| `TestListAll` | `list_all()` | 2件 |
-| `TestComplete` | `complete()` | 2件 |
-| `TestDelete` | `delete()` | 2件 |
-| `TestSearch` | `search()` | 2件 |
-| `TestGetStats` | `get_stats()` | 2件 |
-| `TestEdgeCases` | 各メソッドの異常系 | 9件 |
-| `TestBoundary` | 境界値 | 6件 |
+TodoリストはJSONファイルに以下の形式で保存される。
 
----
+```json
+{
+  "todos": [
+    {"id": 1, "title": "牛乳を買う", "done": true},
+    {"id": 2, "title": "Python学習", "done": false},
+    {"id": 3, "title": "レポートを提出する", "done": false}
+  ],
+  "next_id": 4
+}
+```
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `todos` | array | Todoオブジェクトの配列 |
+| `todos[].id` | integer | Todo固有のID（削除されても再利用しない連番） |
+| `todos[].title` | string | Todoのタイトル（最大200文字） |
+| `todos[].done` | boolean | 完了フラグ（初期値はfalse） |
+| `next_id` | integer | 次に付与するID |
+
+## エラーハンドリング
+
+`add()` メソッドは以下の例外を発生させる。
+
+| 例外 | 発生条件 | 例 |
+|---|---|---|
+| `TypeError` | `title` が `str` 型でない場合 | `add(None)`, `add(123)` |
+| `ValueError` | `title` が空文字または空白のみの場合 | `add("")`, `add("   ")` |
+| `ValueError` | `title` が201文字以上の場合 | `add("あ" * 201)` |
+
+```python
+from src.todo import TodoList
+
+todo_list = TodoList()
+
+try:
+    todo_list.add(None)
+except TypeError as e:
+    print(f"TypeError: {e}")
+# TypeError: titleはstr型でなければなりません
+
+try:
+    todo_list.add("")
+except ValueError as e:
+    print(f"ValueError: {e}")
+# ValueError: titleは空文字にできません
+
+try:
+    todo_list.add("あ" * 201)
+except ValueError as e:
+    print(f"ValueError: {e}")
+# ValueError: titleは200文字以内でなければなりません
+```
 
 ## ディレクトリ構成
 
 ```
 multi-agent-course/
-├── src/              # メインのソースコード
-│   └── todo.py       # TodoListクラスの実装
-├── tests/            # テストコード
-│   └── test_todo.py  # TodoListのテスト（29件）
-├── docs/             # ドキュメント
-├── main.py           # エントリーポイント
-├── pyproject.toml    # プロジェクト設定・依存関係
-├── uv.lock           # uvのロックファイル
-└── README.md         # 本ファイル
+├── src/
+│   └── todo.py          # TodoListクラスの実装
+├── tests/
+│   └── test_todo.py     # pytestによるテストコード
+├── docs/                # 追加ドキュメント用ディレクトリ
+├── main.py              # エントリーポイント
+├── pyproject.toml       # プロジェクト設定・依存関係
+├── CLAUDE.md            # Claude Code向けプロジェクト指示
+└── README.md            # このファイル
 ```
 
----
+## 技術スタック
 
-## 既知の問題
-
-コードレビューによって以下の問題が確認されている。今後の修正対象として記録する。
-
-### 高優先度
-
-| 問題箇所 | 内容 |
-|----------|------|
-| `load()` | ファイルが存在しない場合に `FileNotFoundError` が発生する。例外処理が実装されておらず、初回起動時にクラッシュする |
-| `get_stats()` | タスクが0件のとき `done / total` の計算で `ZeroDivisionError` が発生する |
-| `load()` / `save()` | `with` 文を使用していないため、例外発生時にファイルディスクリプタがリークする可能性がある |
-| `complete()` | 存在しないIDを指定した場合、例外を送出せず暗黙的に `None` を返す |
-| `delete()` | 存在しないIDを指定した場合、例外を送出せず暗黙的に `None` を返す |
-| `filepath` | パストラバーサル（`"../../etc/passwd"` など）に対する入力検証がない |
-| `add()` | タイトルの入力値検証（空文字チェック・長さ制限など）がない |
-
-### 中優先度
-
-| 問題箇所 | 内容 |
-|----------|------|
-| `search()` | 大文字小文字を区別するため、`"buy"` で `"Buy"` はヒットしない |
-| `load()` / `save()` | `open()` に `encoding` を指定していないため、実行環境によっては日本語が文字化けするリスクがある |
-| 全メソッド | 型アノテーションが付与されていない |
-
----
-
-## 開発ルール
-
-- コメントとドキュメントは日本語で記述する
-- パッケージの追加は `uv add` を使う（`pip install` は使用禁止）
-- スクリプト実行は `uv run python` を使う
-- テスト実行は `uv run pytest` を使う
+- Python 3.14.2
+- パッケージ管理: uv
+- テスト: pytest
+- フレームワーク: FastAPI（将来的な拡張用）

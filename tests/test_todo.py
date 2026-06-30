@@ -1,320 +1,323 @@
 """
-src/todo.py の TodoList クラスに対するテスト
-
-正常系・異常系・エッジケースを網羅する。
-各テストは tmp_path フィクスチャを使い、ファイルシステムへの副作用を避ける。
+src/todo.py の TodoList クラスに対するテスト。
+各メソッドについて正常系・異常系を網羅する。
 """
 import json
 import pytest
-
 from src.todo import TodoList
 
 
-# ---------------------------------------------------------------------------
-# ヘルパー
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────
+# フィクスチャ
+# ─────────────────────────────────────────────
 
-def make_todo_list(tmp_path, todos=None, next_id=1):
-    """テスト用の TodoList インスタンスを生成するヘルパー。
-
-    指定した初期データで JSON ファイルを作成してから TodoList を返す。
-    """
-    filepath = tmp_path / "todos.json"
-    initial = {"todos": todos if todos is not None else [], "next_id": next_id}
-    filepath.write_text(json.dumps(initial), encoding="utf-8")
-    return TodoList(str(filepath))
+@pytest.fixture
+def todo_list(tmp_path):
+    """一時ディレクトリにJSONファイルを作成してTodoListを初期化するフィクスチャ。"""
+    filepath = str(tmp_path / "todos.json")
+    return TodoList(filepath=filepath)
 
 
-# ===========================================================================
-# 正常系テスト
-# ===========================================================================
+# ─────────────────────────────────────────────
+# load メソッド
+# ─────────────────────────────────────────────
+
+class TestLoad:
+    def test_ファイルが存在しない場合は初期状態になること(self, tmp_path):
+        """存在しないファイルパスを渡してもFileNotFoundErrorが発生せず、空リストで初期化される。"""
+        filepath = str(tmp_path / "nonexistent.json")
+        tl = TodoList(filepath=filepath)
+        assert tl.todos == []
+        assert tl.next_id == 1
+
+    def test_壊れたJSONファイルでも初期状態になること(self, tmp_path):
+        """不正なJSONが書かれたファイルを読み込んでも例外が発生せず、空リストで初期化される。"""
+        filepath = tmp_path / "broken.json"
+        filepath.write_text("not valid json", encoding="utf-8")
+        tl = TodoList(filepath=str(filepath))
+        assert tl.todos == []
+        assert tl.next_id == 1
+
+    def test_キーが欠落したJSONでも初期状態になること(self, tmp_path):
+        """必要なキーが存在しないJSONファイルを読み込んでも例外が発生せず、空リストで初期化される。"""
+        filepath = tmp_path / "missing_key.json"
+        filepath.write_text(json.dumps({"other": "data"}), encoding="utf-8")
+        tl = TodoList(filepath=str(filepath))
+        assert tl.todos == []
+        assert tl.next_id == 1
+
+    def test_正常なJSONファイルからデータを復元できること(self, tmp_path):
+        """正しい形式のJSONファイルからtodosとnext_idが正しく読み込まれる。"""
+        filepath = tmp_path / "todos.json"
+        data = {
+            "todos": [{"id": 1, "title": "タスク1", "done": False}],
+            "next_id": 2,
+        }
+        filepath.write_text(json.dumps(data), encoding="utf-8")
+        tl = TodoList(filepath=str(filepath))
+        assert len(tl.todos) == 1
+        assert tl.next_id == 2
+
+
+# ─────────────────────────────────────────────
+# add メソッド
+# ─────────────────────────────────────────────
 
 class TestAdd:
-    """add() メソッドの正常系テスト"""
-
-    def test_タスクを追加できる(self, tmp_path):
-        """add() でタスクを追加し、返り値に id・title・done が含まれることを確認する"""
-        tl = make_todo_list(tmp_path)
-        todo = tl.add("牛乳を買う")
-        assert todo["title"] == "牛乳を買う"
-        assert todo["done"] is False
-        assert todo["id"] == 1
-
-    def test_複数タスクを追加するとIDが連番になる(self, tmp_path):
-        """add() を複数回呼ぶと ID が 1, 2, 3 ... と自動採番されることを確認する"""
-        tl = make_todo_list(tmp_path)
-        t1 = tl.add("タスク1")
-        t2 = tl.add("タスク2")
-        t3 = tl.add("タスク3")
+    def test_タスク追加でIDが連番になること(self, todo_list):
+        """複数のタスクを追加したとき、IDが1から順番に採番される。"""
+        t1 = todo_list.add("タスク1")
+        t2 = todo_list.add("タスク2")
+        t3 = todo_list.add("タスク3")
         assert t1["id"] == 1
         assert t2["id"] == 2
         assert t3["id"] == 3
 
-    def test_追加したタスクがlist_allに含まれる(self, tmp_path):
-        """add() 後に list_all() が追加したタスクを返すことを確認する"""
-        tl = make_todo_list(tmp_path)
-        tl.add("朝食を食べる")
-        all_todos = tl.list_all()
-        assert len(all_todos) == 1
-        assert all_todos[0]["title"] == "朝食を食べる"
+    def test_タイトルが前後の空白をtrimされること(self, todo_list):
+        """前後に空白を含むタイトルを渡すと、strip()が適用されて保存される。"""
+        todo = todo_list.add("  テストタスク  ")
+        assert todo["title"] == "テストタスク"
 
-    def test_タスクを追加するとファイルに保存される(self, tmp_path):
-        """add() 後にファイルの内容が更新されることを確認する"""
-        filepath = tmp_path / "todos.json"
-        initial = {"todos": [], "next_id": 1}
-        filepath.write_text(json.dumps(initial), encoding="utf-8")
-        tl = TodoList(str(filepath))
-        tl.add("保存確認タスク")
-        data = json.loads(filepath.read_text(encoding="utf-8"))
-        assert len(data["todos"]) == 1
-        assert data["todos"][0]["title"] == "保存確認タスク"
+    def test_新規タスクはdone_Falseで初期化されること(self, todo_list):
+        """追加直後のタスクのdoneフラグはFalseである。"""
+        todo = todo_list.add("新規タスク")
+        assert todo["done"] is False
 
+    def test_空文字列はValueErrorになること(self, todo_list):
+        """空文字列をタイトルに指定するとValueErrorが発生する。"""
+        with pytest.raises(ValueError):
+            todo_list.add("")
+
+    def test_空白のみの文字列もValueErrorになること(self, todo_list):
+        """空白のみの文字列をタイトルに指定するとValueErrorが発生する（strip後に空になるため）。"""
+        with pytest.raises(ValueError):
+            todo_list.add("   ")
+
+    def test_NoneはTypeErrorになること(self, todo_list):
+        """Noneをタイトルに指定するとTypeErrorが発生する。"""
+        with pytest.raises(TypeError):
+            todo_list.add(None)
+
+    def test_200文字以内のタイトルは正常に追加されること(self, todo_list):
+        """200文字のタイトルは正常に追加される。"""
+        title = "あ" * 200
+        todo = todo_list.add(title)
+        assert todo["title"] == title
+
+    def test_201文字のタイトルはValueErrorになること(self, todo_list):
+        """201文字のタイトルを指定するとValueErrorが発生する。"""
+        title = "あ" * 201
+        with pytest.raises(ValueError):
+            todo_list.add(title)
+
+
+# ─────────────────────────────────────────────
+# list_all メソッド
+# ─────────────────────────────────────────────
 
 class TestListAll:
-    """list_all() メソッドの正常系テスト"""
+    def test_空リストを返すこと(self, todo_list):
+        """Todoが0件のとき、list_allは空リストを返す。"""
+        assert todo_list.list_all() == []
 
-    def test_空のリストを返す(self, tmp_path):
-        """タスクが 0 件のとき list_all() は空リストを返すことを確認する"""
-        tl = make_todo_list(tmp_path)
-        assert tl.list_all() == []
+    def test_複数件返すこと(self, todo_list):
+        """追加したTodoの件数と一致するリストを返す。"""
+        todo_list.add("タスク1")
+        todo_list.add("タスク2")
+        result = todo_list.list_all()
+        assert len(result) == 2
 
-    def test_追加した全タスクを返す(self, tmp_path):
-        """追加した件数分のタスクが list_all() で取得できることを確認する"""
-        tl = make_todo_list(tmp_path)
-        tl.add("タスクA")
-        tl.add("タスクB")
-        assert len(tl.list_all()) == 2
+    def test_コピーが返ること_内部リストと別オブジェクト(self, todo_list):
+        """list_allの返却値は内部リストのコピーであり、同一オブジェクトではない。"""
+        todo_list.add("タスク1")
+        result = todo_list.list_all()
+        assert result is not todo_list.todos
 
+    def test_返却リストを変更しても内部状態が変わらないこと(self, todo_list):
+        """list_allで取得したリストを変更しても、内部のtodosリストは影響を受けない。"""
+        todo_list.add("タスク1")
+        result = todo_list.list_all()
+        result.clear()
+        assert len(todo_list.todos) == 1
+
+    def test_空でも例外が発生しないこと(self, todo_list):
+        """Todoが空のとき、list_allは例外を発生させない。"""
+        try:
+            todo_list.list_all()
+        except Exception as e:
+            pytest.fail(f"予期しない例外が発生した: {e}")
+
+
+# ─────────────────────────────────────────────
+# complete メソッド
+# ─────────────────────────────────────────────
 
 class TestComplete:
-    """complete() メソッドの正常系テスト"""
+    def test_完了フラグがTrueになること(self, todo_list):
+        """completeを呼び出すと対象TodoのdoneがTrueになる。"""
+        todo = todo_list.add("タスク1")
+        todo_list.complete(todo["id"])
+        assert todo_list.list_all()[0]["done"] is True
 
-    def test_タスクを完了にできる(self, tmp_path):
-        """complete() を呼ぶと done が True になることを確認する"""
-        tl = make_todo_list(tmp_path)
-        todo = tl.add("報告書を書く")
-        result = tl.complete(todo["id"])
-        assert result is not None
+    def test_完了済みtodoを再度completeできること(self, todo_list):
+        """既にdone=TrueのTodoをcompleteしてもエラーにならず、done=Trueのまま返る。"""
+        todo = todo_list.add("タスク1")
+        todo_list.complete(todo["id"])
+        result = todo_list.complete(todo["id"])
         assert result["done"] is True
 
-    def test_complete後に他タスクはdoneのままでない(self, tmp_path):
-        """complete() は指定 ID のタスクのみ完了にすることを確認する"""
-        tl = make_todo_list(tmp_path)
-        t1 = tl.add("タスク1")
-        t2 = tl.add("タスク2")
-        tl.complete(t1["id"])
-        assert tl.todos[0]["done"] is True
-        assert tl.todos[1]["done"] is False
+    def test_返却値が該当todoであること(self, todo_list):
+        """completeの返却値は対象Todoの辞書である。"""
+        todo = todo_list.add("タスク1")
+        result = todo_list.complete(todo["id"])
+        assert result["id"] == todo["id"]
+        assert result["title"] == todo["title"]
+        assert result["done"] is True
 
+    def test_存在しないIDはNoneを返すこと(self, todo_list):
+        """存在しないIDを指定するとNoneが返る。"""
+        result = todo_list.complete(9999)
+        assert result is None
+
+    def test_負のIDはNoneを返すこと(self, todo_list):
+        """負のIDを指定するとNoneが返る。"""
+        result = todo_list.complete(-1)
+        assert result is None
+
+
+# ─────────────────────────────────────────────
+# delete メソッド
+# ─────────────────────────────────────────────
 
 class TestDelete:
-    """delete() メソッドの正常系テスト"""
+    def test_削除後にlist_allに含まれないこと(self, todo_list):
+        """deleteを呼び出した後、そのTodoはlist_allに含まれない。"""
+        todo = todo_list.add("タスク1")
+        todo_list.delete(todo["id"])
+        ids = [t["id"] for t in todo_list.list_all()]
+        assert todo["id"] not in ids
 
-    def test_タスクを削除できる(self, tmp_path):
-        """delete() が True を返し、リストから対象タスクが消えることを確認する"""
-        tl = make_todo_list(tmp_path)
-        todo = tl.add("削除するタスク")
-        result = tl.delete(todo["id"])
+    def test_削除後に他のtodoは残ること(self, todo_list):
+        """1件削除しても、他のTodoは削除されずに残る。"""
+        t1 = todo_list.add("タスク1")
+        t2 = todo_list.add("タスク2")
+        todo_list.delete(t1["id"])
+        remaining = todo_list.list_all()
+        assert len(remaining) == 1
+        assert remaining[0]["id"] == t2["id"]
+
+    def test_削除成功時はTrueを返すこと(self, todo_list):
+        """deleteが成功するとTrueが返る。"""
+        todo = todo_list.add("タスク1")
+        result = todo_list.delete(todo["id"])
         assert result is True
-        assert len(tl.list_all()) == 0
 
-    def test_中間タスクを削除しても残りが保持される(self, tmp_path):
-        """3 件中の 2 件目を削除したとき、残り 2 件が保持されることを確認する"""
-        tl = make_todo_list(tmp_path)
-        t1 = tl.add("タスク1")
-        t2 = tl.add("タスク2")
-        t3 = tl.add("タスク3")
-        tl.delete(t2["id"])
-        remaining = tl.list_all()
-        assert len(remaining) == 2
-        ids = [t["id"] for t in remaining]
-        assert t1["id"] in ids
-        assert t3["id"] in ids
-        assert t2["id"] not in ids
+    def test_存在しないIDはFalseを返すこと(self, todo_list):
+        """存在しないIDを指定するとFalseが返る。"""
+        result = todo_list.delete(9999)
+        assert result is False
 
+    def test_空リストへのdeleteはFalseを返すこと(self, todo_list):
+        """Todoが0件のとき、deleteはFalseを返す。"""
+        result = todo_list.delete(1)
+        assert result is False
+
+
+# ─────────────────────────────────────────────
+# search メソッド
+# ─────────────────────────────────────────────
 
 class TestSearch:
-    """search() メソッドの正常系テスト"""
+    def test_キーワードにマッチするtodoを返すこと(self, todo_list):
+        """キーワードを含むTodoのみが返される。"""
+        todo_list.add("買い物リスト")
+        todo_list.add("運動する")
+        result = todo_list.search("買い物")
+        assert len(result) == 1
+        assert result[0]["title"] == "買い物リスト"
 
-    def test_キーワードにマッチするタスクを返す(self, tmp_path):
-        """search() がキーワードを含むタスクのみ返すことを確認する"""
-        tl = make_todo_list(tmp_path)
-        tl.add("牛乳を買う")
-        tl.add("パンを買う")
-        tl.add("運動をする")
-        results = tl.search("買う")
-        assert len(results) == 2
+    def test_大文字小文字を区別しないこと(self, todo_list):
+        """小文字キーワードで大文字を含むタイトルを検索できる（逆も同様）。"""
+        todo_list.add("Python勉強")
+        result = todo_list.search("python")
+        assert len(result) == 1
 
-    def test_マッチしない場合は空リスト(self, tmp_path):
-        """search() でマッチしないキーワードを渡すと空リストが返ることを確認する"""
-        tl = make_todo_list(tmp_path)
-        tl.add("牛乳を買う")
-        results = tl.search("存在しないキーワード")
-        assert results == []
+        todo_list.add("javascript入門")
+        result2 = todo_list.search("JavaScript")
+        assert len(result2) == 1
 
+    def test_空キーワードで全件返すこと(self, todo_list):
+        """空文字列をキーワードに指定すると全Todoが返される。"""
+        todo_list.add("タスク1")
+        todo_list.add("タスク2")
+        result = todo_list.search("")
+        assert len(result) == 2
+
+    def test_マッチしないキーワードは空リストを返すこと(self, todo_list):
+        """どのTodoにもマッチしないキーワードを指定すると空リストが返される。"""
+        todo_list.add("買い物リスト")
+        result = todo_list.search("存在しないキーワード")
+        assert result == []
+
+    def test_部分一致で検索できること(self, todo_list):
+        """キーワードがタイトルの一部に含まれていれば検索にヒットする。"""
+        todo_list.add("Pythonの勉強をする")
+        todo_list.add("Javaの勉強をする")
+        result = todo_list.search("勉強")
+        assert len(result) == 2
+
+
+# ─────────────────────────────────────────────
+# get_stats メソッド
+# ─────────────────────────────────────────────
 
 class TestGetStats:
-    """get_stats() メソッドの正常系テスト"""
-
-    def test_統計情報が正しく返る(self, tmp_path):
-        """タスクが複数件あるとき get_stats() の total / done / pending / rate が正しいことを確認する"""
-        tl = make_todo_list(tmp_path)
-        t1 = tl.add("タスク1")
-        t2 = tl.add("タスク2")
-        tl.add("タスク3")
-        tl.complete(t1["id"])
-        tl.complete(t2["id"])
-        stats = tl.get_stats()
-        assert stats["total"] == 3
+    def test_全件完了時のrateが1_0であること(self, todo_list):
+        """全Todoが完了状態のとき、rateは1.0になる。"""
+        t1 = todo_list.add("タスク1")
+        t2 = todo_list.add("タスク2")
+        todo_list.complete(t1["id"])
+        todo_list.complete(t2["id"])
+        stats = todo_list.get_stats()
+        assert stats["rate"] == 1.0
         assert stats["done"] == 2
-        assert stats["pending"] == 1
-        assert pytest.approx(stats["rate"]) == 2 / 3
+        assert stats["pending"] == 0
 
-    def test_全件完了時にrateが1_0になる(self, tmp_path):
-        """全タスクを完了にしたとき rate が 1.0 になることを確認する"""
-        tl = make_todo_list(tmp_path)
-        t = tl.add("唯一のタスク")
-        tl.complete(t["id"])
-        stats = tl.get_stats()
-        assert stats["rate"] == 1.0
+    def test_未完了のみのrateが0_0であること(self, todo_list):
+        """完了済みTodoが0件のとき、rateは0.0になる。"""
+        todo_list.add("タスク1")
+        todo_list.add("タスク2")
+        stats = todo_list.get_stats()
+        assert stats["rate"] == 0.0
+        assert stats["done"] == 0
+        assert stats["pending"] == 2
 
+    def test_混在時の正確なrateが返ること(self, todo_list):
+        """完了2件・未完了2件のとき、rateは0.5になる。"""
+        t1 = todo_list.add("タスク1")
+        t2 = todo_list.add("タスク2")
+        todo_list.add("タスク3")
+        todo_list.add("タスク4")
+        todo_list.complete(t1["id"])
+        todo_list.complete(t2["id"])
+        stats = todo_list.get_stats()
+        assert stats["total"] == 4
+        assert stats["done"] == 2
+        assert stats["pending"] == 2
+        assert stats["rate"] == pytest.approx(0.5)
 
-# ===========================================================================
-# 異常系・エッジケーステスト
-# ===========================================================================
-
-class TestEdgeCases:
-    """コードレビューで指摘されたエッジケースのテスト"""
-
-    # ------------------------------------------------------------------
-    # エッジケース 1: load() のファイル未存在
-    # ------------------------------------------------------------------
-    def test_ファイルが存在しない場合にFileNotFoundErrorが発生する(self, tmp_path):
-        """初回起動時（JSON ファイルなし）に FileNotFoundError が送出されるバグを確認する"""
-        non_existent = str(tmp_path / "not_exists.json")
-        with pytest.raises(FileNotFoundError):
-            TodoList(non_existent)
-
-    # ------------------------------------------------------------------
-    # エッジケース 2: get_stats() のゼロ除算
-    # ------------------------------------------------------------------
-    def test_タスクが0件のときget_statsはZeroDivisionErrorになる(self, tmp_path):
-        """タスクが 0 件のとき get_stats() が ZeroDivisionError を送出するバグを確認する"""
-        tl = make_todo_list(tmp_path)
-        with pytest.raises(ZeroDivisionError):
-            tl.get_stats()
-
-    # ------------------------------------------------------------------
-    # エッジケース 3: complete() の存在しない ID
-    # ------------------------------------------------------------------
-    def test_存在しないIDのcompleteはNoneを返す(self, tmp_path):
-        """complete() に存在しない ID を渡すと暗黙的に None が返るバグ相当の挙動を確認する"""
-        tl = make_todo_list(tmp_path)
-        tl.add("タスク")
-        result = tl.complete(9999)
-        assert result is None
-
-    def test_空リストでcompleteはNoneを返す(self, tmp_path):
-        """タスクが 0 件の状態で complete() を呼ぶと None が返ることを確認する"""
-        tl = make_todo_list(tmp_path)
-        result = tl.complete(1)
-        assert result is None
-
-    # ------------------------------------------------------------------
-    # エッジケース 4: delete() の存在しない ID
-    # ------------------------------------------------------------------
-    def test_存在しないIDのdeleteはNoneを返す(self, tmp_path):
-        """delete() に存在しない ID を渡すと暗黙的に None が返るバグ相当の挙動を確認する"""
-        tl = make_todo_list(tmp_path)
-        tl.add("タスク")
-        result = tl.delete(9999)
-        assert result is None
-
-    def test_空リストでdeleteはNoneを返す(self, tmp_path):
-        """タスクが 0 件の状態で delete() を呼ぶと None が返ることを確認する"""
-        tl = make_todo_list(tmp_path)
-        result = tl.delete(1)
-        assert result is None
-
-    def test_存在しないIDのdeleteはリストを変化させない(self, tmp_path):
-        """存在しない ID への delete() 後もリストの件数が変わらないことを確認する"""
-        tl = make_todo_list(tmp_path)
-        tl.add("タスク1")
-        tl.add("タスク2")
-        tl.delete(9999)
-        assert len(tl.list_all()) == 2
-
-    # ------------------------------------------------------------------
-    # エッジケース 5: search() の大文字小文字
-    # ------------------------------------------------------------------
-    def test_検索は大文字小文字を区別するため異なるケースはヒットしない(self, tmp_path):
-        """search() は大文字小文字を区別するため、"buy" で "Buy" はヒットしないバグを確認する"""
-        tl = make_todo_list(tmp_path)
-        tl.add("Buy milk")
-        results = tl.search("buy")
-        # 大文字小文字を区別するため "buy" では "Buy" がヒットしないことを確認する
-        assert len(results) == 0
-
-    def test_完全一致するケースはヒットする(self, tmp_path):
-        """search() でタイトルと同じ大文字小文字のキーワードならヒットすることを確認する"""
-        tl = make_todo_list(tmp_path)
-        tl.add("Buy milk")
-        results = tl.search("Buy")
-        assert len(results) == 1
-
-
-# ===========================================================================
-# 境界値テスト
-# ===========================================================================
-
-class TestBoundary:
-    """境界値テスト"""
-
-    def test_空文字タイトルのタスクを追加できる(self, tmp_path):
-        """title が空文字でも add() でタスクを追加できることを確認する"""
-        tl = make_todo_list(tmp_path)
-        todo = tl.add("")
-        assert todo["title"] == ""
-        assert todo["id"] == 1
-
-    def test_空文字キーワードで全タスクがヒットする(self, tmp_path):
-        """search("") は全タスクのタイトルにマッチするため全件返ることを確認する"""
-        tl = make_todo_list(tmp_path)
-        tl.add("タスクA")
-        tl.add("タスクB")
-        results = tl.search("")
-        assert len(results) == 2
-
-    def test_非常に長いタイトルのタスクを追加できる(self, tmp_path):
-        """非常に長い title 文字列でも add() がエラーなく動作することを確認する"""
-        tl = make_todo_list(tmp_path)
-        long_title = "あ" * 10000
-        todo = tl.add(long_title)
-        assert todo["title"] == long_title
-
-    def test_1件だけ完了のrateが1_0(self, tmp_path):
-        """1 件追加して完了にした場合に rate が 1.0 になることを確認する"""
-        tl = make_todo_list(tmp_path)
-        t = tl.add("タスク")
-        tl.complete(t["id"])
-        stats = tl.get_stats()
-        assert stats["rate"] == 1.0
-
-    def test_1件だけ未完了のrateが0_0(self, tmp_path):
-        """1 件追加して未完了の場合に rate が 0.0 になることを確認する"""
-        tl = make_todo_list(tmp_path)
-        tl.add("タスク")
-        stats = tl.get_stats()
+    def test_todoが0件のときZeroDivisionErrorが発生しないこと(self, todo_list):
+        """Todoが0件のとき、get_statsはZeroDivisionErrorを発生させず、rate=0.0を返す。"""
+        stats = todo_list.get_stats()
+        assert stats["total"] == 0
+        assert stats["done"] == 0
+        assert stats["pending"] == 0
         assert stats["rate"] == 0.0
 
-    def test_次IDが引き継がれてファイル再読み込み後も連番になる(self, tmp_path):
-        """ファイルに保存後、別インスタンスで読み込んでも next_id が継続されることを確認する"""
-        filepath = tmp_path / "todos.json"
-        initial = {"todos": [], "next_id": 1}
-        filepath.write_text(json.dumps(initial), encoding="utf-8")
-        tl1 = TodoList(str(filepath))
-        tl1.add("タスク1")
-        # 別インスタンスで読み込む
-        tl2 = TodoList(str(filepath))
-        t2 = tl2.add("タスク2")
-        assert t2["id"] == 2
+    def test_pendingが負にならないこと(self, todo_list):
+        """pendingはtotal - doneで算出され、負の値にならない。"""
+        t1 = todo_list.add("タスク1")
+        todo_list.complete(t1["id"])
+        stats = todo_list.get_stats()
+        assert stats["pending"] >= 0
+        assert stats["pending"] == stats["total"] - stats["done"]

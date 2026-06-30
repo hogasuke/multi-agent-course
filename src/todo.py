@@ -1,252 +1,226 @@
 import json
+from typing import Optional
 
 
 class TodoList:
-    """JSONファイルを永続化ストレージとして使うTodoリスト管理クラス。
+    """JSONファイルを永続化ストレージとするTodoリスト管理クラス。
 
-    タスクの追加・一覧取得・完了・削除・検索・統計取得の機能を提供する。
-    インスタンス生成時に指定したJSONファイルを自動的に読み込む。
+    インスタンス化と同時に指定されたJSONファイルを読み込む。
+    追加・完了・削除などの書き込み操作は都度ファイルに保存されるため、
+    プロセスを再起動してもデータが失われない。
 
     Attributes:
-        filepath (str): タスクデータを保存するJSONファイルのパス。
-        todos (list[dict]): 現在のタスク一覧。各要素は id・title・done を持つ辞書。
-        next_id (int): 次に追加するタスクへ割り当てるID。
+        filepath: データを保存するJSONファイルのパス。
+        todos: Todoの辞書リスト。各辞書はid(int)、title(str)、done(bool)を持つ。
+        next_id: 次に付与するTodoのID（削除されても再利用しない連番）。
+
+    Note:
+        ファイルが存在しない場合は空のリストで初期化される。
+        ファイルが破損しているか必要なキーが欠落している場合も
+        同様に初期状態（空リスト・next_id=1）にフォールバックする。
 
     Example:
-        >>> tl = TodoList("my_todos.json")
-        >>> todo = tl.add("牛乳を買う")
-        >>> tl.complete(todo["id"])
-        >>> tl.get_stats()
-        {'total': 1, 'done': 1, 'pending': 0, 'rate': 1.0}
+        >>> todo_list = TodoList("my_todos.json")
+        >>> item = todo_list.add("牛乳を買う")
+        >>> print(item)
+        {'id': 1, 'title': '牛乳を買う', 'done': False}
     """
 
-    def __init__(self, filepath="todos.json"):
-        """TodoListを初期化し、JSONファイルからデータを読み込む。
-
-        Args:
-            filepath (str): タスクデータを保存するJSONファイルのパス。
-                デフォルトは "todos.json"。
-
-        Raises:
-            FileNotFoundError: 指定したファイルが存在しない場合に発生する。
-                初回起動時はファイルを事前に作成しておく必要がある。
-                （既知の問題: 自動作成は行われない）
-
-        Note:
-            filepath にパストラバーサル（例: "../../etc/passwd"）を含む値を
-            渡しても入力検証は行われない。（既知の問題）
-        """
+    def __init__(self, filepath: str = "todos.json") -> None:
         self.filepath = filepath
-        self.todos = []
-        self.next_id = 1
+        self.todos: list[dict] = []
+        self.next_id: int = 1
         self.load()
 
-    def load(self):
-        """JSONファイルからタスクデータを読み込み、インスタンスの状態を更新する。
+    def load(self) -> None:
+        """ファイルからTodoリストを読み込む。ファイルが存在しない・壊れている場合は初期状態にフォールバックする。
 
-        Raises:
-            FileNotFoundError: self.filepath が存在しない場合に発生する。
-                例外処理は実装されていないため、呼び出し元が対処する必要がある。
-                （既知の問題）
-
-        Note:
-            - ファイルオープンに ``with`` 文を使用していないため、
-              例外発生時にファイルディスクリプタがリークする可能性がある。
-              （既知の問題）
-            - ``open()`` に ``encoding`` を指定していないため、
-              実行環境によっては日本語が文字化けするリスクがある。
-              （既知の問題）
+        FileNotFoundError、json.JSONDecodeError、KeyError が発生した場合は
+        例外を握り潰し、todos を空リスト・next_id を 1 にリセットする。
+        このメソッドは __init__ から自動的に呼ばれるため、通常は直接呼び出す必要はない。
         """
-        f = open(self.filepath, "r")
-        data = json.load(f)
-        self.todos = data["todos"]
-        self.next_id = data["next_id"]
-        f.close()
+        try:
+            with open(self.filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                self.todos = data["todos"]
+                self.next_id = data["next_id"]
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            # ファイルが存在しない・JSONが壊れている・キーが欠落している場合は初期状態にする
+            self.todos = []
+            self.next_id = 1
 
-    def save(self):
-        """現在のタスク一覧とnext_idをJSONファイルに書き込む。
+    def save(self) -> None:
+        """TodoリストをJSONファイルに保存する。
 
-        Note:
-            - ファイルオープンに ``with`` 文を使用していないため、
-              例外発生時にファイルディスクリプタがリークする可能性がある。
-              （既知の問題）
-            - ``open()`` に ``encoding`` を指定していないため、
-              実行環境によっては日本語が文字化けするリスクがある。
-              （既知の問題）
+        todos と next_id を JSON 形式でファイルに書き出す。
+        日本語タイトルを正しく保存するため ensure_ascii=False を指定している。
+        このメソッドは書き込み操作（add・complete・delete）から自動的に呼ばれる。
         """
-        f = open(self.filepath, "w")
-        json.dump({"todos": self.todos, "next_id": self.next_id}, f)
-        f.close()
+        with open(self.filepath, "w", encoding="utf-8") as f:
+            json.dump({"todos": self.todos, "next_id": self.next_id}, f, ensure_ascii=False)
 
-    def add(self, title):
-        """新しいタスクを追加する。
-
-        タスクを内部リストへ追加し、next_idを1増加させてからファイルに保存する。
+    def add(self, title: str) -> dict:
+        """新しいTodoを追加する。
 
         Args:
-            title (str): タスクのタイトル。空文字や非常に長い文字列も受け付ける。
+            title: Todoのタイトル。前後の空白は自動的に除去される。
+                空文字・空白のみ・None・201文字以上は受け付けない。
 
         Returns:
-            dict: 追加されたタスクの辞書。キーは以下の通り。
-                - id (int): タスクの一意なID。
-                - title (str): タスクのタイトル。
-                - done (bool): 完了フラグ。追加直後は必ず False。
+            追加されたTodoの辞書。キーは id(int)、title(str)、done(bool=False)。
+
+        Raises:
+            TypeError: titleがstr型でない場合（Noneを含む）。
+            ValueError: titleが空文字（空白のみも含む）または200文字を超える場合。
 
         Example:
-            >>> tl = TodoList("todos.json")
-            >>> todo = tl.add("買い物をする")
-            >>> todo
-            {'id': 1, 'title': '買い物をする', 'done': False}
-
-        Note:
-            title の入力値検証（空文字チェック・長さ制限など）は行っていない。
-            （既知の問題）
+            >>> todo_list = TodoList()
+            >>> item = todo_list.add("買い物リストを作る")
+            >>> print(item)
+            {'id': 1, 'title': '買い物リストを作る', 'done': False}
         """
+        if not isinstance(title, str):
+            raise TypeError("titleはstr型でなければなりません")
+
+        # 前後の空白を除去してから検証する
+        title = title.strip()
+
+        if not title:
+            raise ValueError("titleは空文字にできません")
+
+        if len(title) > 200:
+            raise ValueError("titleは200文字以内でなければなりません")
+
         todo = {"id": self.next_id, "title": title, "done": False}
         self.todos.append(todo)
         self.next_id += 1
         self.save()
         return todo
 
-    def list_all(self):
-        """全タスクの一覧を返す。
+    def list_all(self) -> list[dict]:
+        """全Todoのコピーを返す。内部リストへの直接参照は返さない。
 
         Returns:
-            list[dict]: 全タスクを格納したリスト。
-                タスクが0件の場合は空リストを返す。
-                各辞書のキーは id・title・done。
+            全Todoを含む辞書のリスト。リストは内部データのシャローコピーであり、
+            返却されたリスト自体への変更は内部状態に影響しない。
+            Todoが0件のときは空リストを返す。
 
         Example:
-            >>> tl = TodoList("todos.json")
-            >>> tl.add("タスクA")
-            >>> tl.add("タスクB")
-            >>> tl.list_all()
-            [{'id': 1, 'title': 'タスクA', 'done': False},
-             {'id': 2, 'title': 'タスクB', 'done': False}]
+            >>> todo_list = TodoList()
+            >>> todo_list.add("タスクA")
+            {'id': 1, 'title': 'タスクA', 'done': False}
+            >>> print(todo_list.list_all())
+            [{'id': 1, 'title': 'タスクA', 'done': False}]
         """
-        return self.todos
+        return list(self.todos)
 
-    def complete(self, todo_id):
-        """指定したIDのタスクを完了状態にする。
-
-        タスクの ``done`` フィールドを True に設定してファイルに保存する。
+    def complete(self, todo_id: int) -> Optional[dict]:
+        """指定IDのTodoを完了状態にする。
 
         Args:
-            todo_id (int): 完了にするタスクのID。
+            todo_id: 完了にするTodoのID（正の整数を想定）。
 
         Returns:
-            dict | None: 完了にしたタスクの辞書を返す。
-                指定したIDのタスクが存在しない場合は暗黙的に None を返す。
+            完了状態になったTodoの辞書。IDが見つからない場合はNone。
+            すでに完了済みのTodoに対して呼び出しても done=True のまま正常に返す。
 
         Example:
-            >>> tl = TodoList("todos.json")
-            >>> todo = tl.add("レポートを書く")
-            >>> result = tl.complete(todo["id"])
-            >>> result["done"]
+            >>> todo_list = TodoList()
+            >>> todo_list.add("レポートを提出する")
+            {'id': 1, 'title': 'レポートを提出する', 'done': False}
+            >>> result = todo_list.complete(1)
+            >>> print(result["done"])
             True
-
-        Note:
-            存在しないIDを指定しても例外は送出されず、戻り値として None が返る。
-            呼び出し元は戻り値が None かどうかを確認して失敗を検出する必要がある。
-            （既知の問題）
+            >>> print(todo_list.complete(999))  # 存在しないID
+            None
         """
         for todo in self.todos:
             if todo["id"] == todo_id:
                 todo["done"] = True
                 self.save()
                 return todo
+        # IDが見つからない場合は明示的にNoneを返す
+        return None
 
-    def delete(self, todo_id):
-        """指定したIDのタスクをリストから削除する。
-
-        対象タスクを内部リストから取り除き、ファイルに保存する。
+    def delete(self, todo_id: int) -> bool:
+        """指定IDのTodoを削除する。
 
         Args:
-            todo_id (int): 削除するタスクのID。
+            todo_id: 削除するTodoのID（正の整数を想定）。
 
         Returns:
-            bool | None: 削除に成功した場合は True を返す。
-                指定したIDのタスクが存在しない場合は暗黙的に None を返す。
+            削除成功時はTrue、IDが見つからない場合はFalse。
+            削除済みのIDや負のIDを指定した場合もFalseを返す。
 
         Example:
-            >>> tl = TodoList("todos.json")
-            >>> todo = tl.add("不要なタスク")
-            >>> tl.delete(todo["id"])
+            >>> todo_list = TodoList()
+            >>> todo_list.add("不要なタスク")
+            {'id': 1, 'title': '不要なタスク', 'done': False}
+            >>> print(todo_list.delete(1))
             True
-            >>> tl.list_all()
-            []
-
-        Note:
-            存在しないIDを指定しても例外は送出されず、戻り値として None が返る。
-            呼び出し元は戻り値が None かどうかを確認して失敗を検出する必要がある。
-            （既知の問題）
+            >>> print(todo_list.delete(1))  # 削除済みのID
+            False
         """
         for i, todo in enumerate(self.todos):
             if todo["id"] == todo_id:
                 self.todos.pop(i)
                 self.save()
                 return True
+        # IDが見つからない場合はFalseを返す
+        return False
 
-    def search(self, keyword):
-        """タイトルにキーワードを含むタスクを検索する。
-
-        全タスクのタイトルに対して部分一致検索を行い、マッチしたタスクを返す。
+    def search(self, keyword: str) -> list[dict]:
+        """キーワードでTodoを検索する（大文字小文字を区別しない）。
 
         Args:
-            keyword (str): 検索するキーワード文字列。
-                空文字を渡すと全タスクがヒットする。
+            keyword: 検索キーワード。大文字・小文字の区別なく部分一致で検索する。
+                空文字を指定すると全件が返る。
 
         Returns:
-            list[dict]: キーワードにマッチしたタスクのリスト。
-                マッチするタスクがない場合は空リストを返す。
+            キーワードにマッチするTodoの辞書リスト。一致するものがなければ空リスト。
 
         Example:
-            >>> tl = TodoList("todos.json")
-            >>> tl.add("牛乳を買う")
-            >>> tl.add("パンを買う")
-            >>> tl.add("運動をする")
-            >>> tl.search("買う")
-            [{'id': 1, 'title': '牛乳を買う', 'done': False},
-             {'id': 2, 'title': 'パンを買う', 'done': False}]
-
-        Note:
-            大文字小文字を区別する検索を行う。
-            例えば ``"buy"`` を渡しても ``"Buy"`` を含むタスクはヒットしない。
-            （既知の問題）
+            >>> todo_list = TodoList()
+            >>> todo_list.add("Python学習")
+            {'id': 1, 'title': 'Python学習', 'done': False}
+            >>> todo_list.add("python環境構築")
+            {'id': 2, 'title': 'python環境構築', 'done': False}
+            >>> results = todo_list.search("python")
+            >>> print(len(results))  # 大文字小文字問わず2件マッチ
+            2
         """
-        result = []
-        for todo in self.todos:
-            if keyword in todo["title"]:
-                result.append(todo)
-        return result
+        keyword_lower = keyword.lower()
+        return [todo for todo in self.todos if keyword_lower in todo["title"].lower()]
 
-    def get_stats(self):
-        """タスクの統計情報を返す。
-
-        全タスク数・完了数・未完了数・完了率を計算して辞書で返す。
+    def get_stats(self) -> dict:
+        """Todoリストの統計情報を返す。
 
         Returns:
-            dict: 統計情報を格納した辞書。キーは以下の通り。
-                - total (int): 全タスク数。
-                - done (int): 完了済みタスク数。
-                - pending (int): 未完了タスク数。
-                - rate (float): 完了率（0.0〜1.0）。
+            以下のキーを持つ辞書。
 
-        Raises:
-            ZeroDivisionError: タスクが0件のときに ``done / total`` の計算で発生する。
-                （既知の問題: タスクが存在することを事前に確認する必要がある）
+            - total (int): Todoの総数。
+            - done (int): 完了済みTodoの件数。
+            - pending (int): 未完了Todoの件数（total - done）。
+            - rate (float): 完了率（0.0〜1.0）。Todoが0件のときは0.0を返し、
+              ZeroDivisionErrorは発生しない。
 
         Example:
-            >>> tl = TodoList("todos.json")
-            >>> tl.add("タスク1")
-            >>> tl.add("タスク2")
-            >>> tl.complete(1)
-            >>> tl.get_stats()
+            >>> todo_list = TodoList()
+            >>> todo_list.add("タスク1")
+            {'id': 1, 'title': 'タスク1', 'done': False}
+            >>> todo_list.add("タスク2")
+            {'id': 2, 'title': 'タスク2', 'done': False}
+            >>> todo_list.complete(1)
+            {'id': 1, 'title': 'タスク1', 'done': True}
+            >>> print(todo_list.get_stats())
             {'total': 2, 'done': 1, 'pending': 1, 'rate': 0.5}
         """
         total = len(self.todos)
-        done = 0
-        for todo in self.todos:
-            if todo["done"]:
-                done += 1
-        return {"total": total, "done": done, "pending": total - done, "rate": done / total}
+        done = sum(1 for todo in self.todos if todo["done"])
+        return {
+            "total": total,
+            "done": done,
+            "pending": total - done,
+            # Todoが0件のときはゼロ除算を避けて0.0を返す
+            "rate": done / total if total > 0 else 0.0,
+        }
