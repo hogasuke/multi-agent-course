@@ -1,173 +1,110 @@
-FastAPIはまだ依存関係に含まれていないようですが、計画に記載の通り想定して進めます。現状のデータモデルを把握したので、レポートを出力します。
+現状のデータモデルとpyproject.tomlを確認したので、レポートを出力します。
 
----
+# Todoアプリ データベース設計調査レポート
 
-# Todoアプリ データ永続化方式 調査レポート
+## 1. 現状の把握
 
-## 1. 現状のデータモデル
+`src/todo.py` の `TodoList` は JSON ファイル（`todos.json`）を永続化層とし、以下のスキーマ相当のデータを保持している。
 
-`src/todo.py` の `TodoList` クラスは、JSONファイル（デフォルト `todos.json`）を永続化先としている。
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `id` | int | 連番ID（`next_id` で採番、削除されても再利用しない） |
+| `title` | str | 1〜200文字、前後空白除去済み |
+| `done` | bool | 完了フラグ |
 
-- データ構造: `{"todos": [...], "next_id": int}`
-- 各Todoは辞書: `{"id": int, "title": str, "done": bool}`
-- 書き込み操作（`add`, `complete`, `delete`）のたびにファイル全体を読み書き
-- IDは削除しても再利用しない連番（アプリ側でインクリメント管理）
-- タイトルは1〜200文字のバリデーションあり
+`pyproject.toml` には現時点でDB関連の依存（SQLAlchemy等）は未追加。Webアプリ化にあたり、FastAPI + ORM + RDBMS構成への移行が必要になる。
 
-この方式はシンプルだが、Webアプリ化を見据えると以下の課題がある。
-
-- **同時アクセスに弱い**: ファイル全体を毎回書き換えるため、複数リクエストが同時に来るとレースコンディション（更新の取りこぼし）が起きうる
-- **検索・集計が非効率**: `search` や `get_stats` は全件をPythonでループしており、件数が増えるとO(n)のメモリ走査になる
-- **スキーマ保証がない**: JSONはアプリ側のコードでしか型・制約を守れない
-
----
-
-## 2. SQLite vs PostgreSQL 比較
+## 2. SQLite vs PostgreSQL 比較表
 
 | 観点 | SQLite | PostgreSQL |
 |---|---|---|
-| コスト | 無料、サーバー不要（ファイル1つ） | 無料（OSS）だが、ホスティング費用が発生（マネージドDB利用時） |
-| セットアップの手間 | ほぼゼロ（標準ライブラリ`sqlite3`で即利用可） | サーバー構築・接続設定・認証情報管理が必要 |
-| スケーラビリティ | 単一ファイル・単一マシン前提。水平スケール不可 | レプリケーション、コネクションプーリング、クラスタ構成が可能 |
-| 同時書き込み耐性 | 弱い（書き込みはファイルロックで直列化、WALモードでも同時書き込みは1つまで） | 強い（MVCCにより複数トランザクションが並行して書き込み可能） |
-| 運用の手間 | バックアップ＝ファイルコピーで完結。運用監視はほぼ不要 | バックアップ・監視・チューニング・アップグレード等の運用コストが発生 |
-| デプロイ環境との親和性 | ローカル開発・CI・組み込み用途に最適 | コンテナ/クラウド環境（複数インスタンス）でのWebアプリ本番運用に最適 |
-| データ型・制約 | 動的型付けでやや緩い（型親和性ルール） | 厳密な型システム、CHECK制約、外部キー等が堅牢 |
-| FastAPIとの組み合わせ | `aiosqlite` + SQLAlchemy(async) で利用可 | `asyncpg` + SQLAlchemy(async) で利用可。本番運用実績が豊富 |
+| 動作形態 | ファイルベース（サーバー不要） | クライアント/サーバー型（要デーモン） |
+| セットアップ | ゼロコンフィグ、`uv run` だけで即動く | Docker/マネージドサービスの用意が必要 |
+| 同時書き込み | 弱い（ファイルロック、`WAL`モードでも書き込みは実質シングルライタ） | 強い（MVCCによる高い並行性） |
+| スケール | 単一プロセス・小規模向け | 複数インスタンス・水平/垂直スケール向け |
+| データ型 | 動的型付け（緩い） | 厳格な型システム（`SERIAL`, `TIMESTAMPTZ`, `JSONB`等） |
+| トランザクション分離 | 基本的なACID対応 | 高度な分離レベル・行ロック制御 |
+| バックアップ/レプリケーション | ファイルコピーのみ | ストリーミングレプリケーション、PITR等が充実 |
+| 拡張機能 | 最小限 | 全文検索、JSONB、拡張機能（pg_trgm等）が豊富 |
+| CI/テストでの扱いやすさ | 非常に容易（`:memory:` DBが使える） | コンテナ起動が必要 |
+| ホスティングコスト | ほぼ無料（ファイルのみ） | マネージドDB利用時はコストが発生 |
 
-**結論**: 個人開発・学習段階の単一プロセスならSQLiteで十分だが、複数Webサーバープロセス/インスタンスからの同時アクセスが発生する本格的なWebアプリでは、書き込みロック競合のリスクからPostgreSQLが望ましい。
+## 3. 開発/本番での使い分け方針
 
----
-
-## 3. 環境別の推奨
-
-### 開発環境: SQLite
-
-- セットアップ不要で即座に開発を開始できる（`uv add` で `aiosqlite` のみ追加すればよい）
-- CI（pytest実行時）でも追加インフラ不要。テスト用DBをインメモリ（`:memory:`）にできるのも利点
-- ファイルベースなので壊れたら削除して作り直せばよく、学習用途のイテレーション速度が高い
-
-### 本番環境: PostgreSQL
-
-- FastAPIは複数ワーカープロセス（Uvicorn/Gunicornのマルチワーカー）で動かすのが一般的であり、SQLiteの書き込み直列化はボトルネック・データ破損リスクになる
-- 将来的なユーザー認証・複数ユーザー対応（Todoの所有者分離）を見据えると、PostgreSQLの堅牢な制約・インデックス機能が活きる
-
-### 開発/本番でのDB使い分けについての注意
-
-「開発はSQLite、本番はPostgreSQL」という使い分けは手軽だが、以下のリスクがあるため**学習目的を超えて本格運用するなら開発環境もPostgreSQLに統一することを推奨**する。
-
-- SQLiteとPostgreSQLでSQL方言・型の挙動（例: `BOOLEAN`の扱い、`AUTOINCREMENT`と`SERIAL`の違い、大文字小文字の比較）に差異があり、開発時に気づかなかったバグが本番で初めて顕在化することがある
-- SQLAlchemyのようなORMを使えば差異は緩和されるが、完全には消えない
-
-本プロジェクトは学習目的の小規模アプリであるため、**まずは開発・本番ともにSQLiteで進め、複数ユーザー・複数プロセスでの運用が必要になった時点でPostgreSQLへ移行する**のが、学習コストと実用性のバランスとして妥当と考える。Docker等で本番相当の環境を用意できるなら、最初から両環境でPostgreSQLに統一してもよい。
-
----
+- **開発環境・CI・ユニットテスト**: SQLite（`sqlite+aiosqlite:///./todo.db`、テストは `sqlite+aiosqlite:///:memory:`）を使用。セットアップ不要で高速に開発ループを回せる。
+- **本番環境**: PostgreSQL（`postgresql+asyncpg://...`）を使用。同時アクセス・データ整合性・将来の機能拡張（全文検索、複数ユーザー対応等）に対応できる。
+- **切り替えの仕組み**: SQLAlchemyの `Engine` はDB接続文字列（DSN）を環境変数（例: `DATABASE_URL`）で切り替えるだけで済むようにし、アプリケーションコード・ORMモデルはDBエンジンに依存しない書き方にする（SQLite固有の型やPostgreSQL固有の型は避けるか、`Enum`は`native_enum=False`にするなど互換性に配慮）。
+- **注意点**: SQLiteは外部キー制約がデフォルト無効なため `PRAGMA foreign_keys=ON` を明示的に有効化すること。また、SQLiteでは `AUTOINCREMENT` の挙動やUPSERTの構文がPostgreSQLと異なるため、ORMのstatement-levelな記述に統一し、生SQLを避けるのが安全。
 
 ## 4. 推奨スキーマ
 
-現状の `id`, `title`, `done` に加え、Web化を見据えて以下を拡張案とする。
+現状の `Todo` 構造（id/title/done）を土台に、Webアプリ化で最低限欲しくなる項目（作成・更新日時）を追加する。将来のユーザー管理は見据えつつ、現時点でオーバーエンジニアリングにならない最小限の拡張に留める。
 
 ```sql
+-- todos テーブル
 CREATE TABLE todos (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,  -- PostgreSQLではSERIAL/GENERATED ALWAYS AS IDENTITYに置換
-    title       VARCHAR(200) NOT NULL,
+    id          INTEGER PRIMARY KEY,      -- SQLite: INTEGER PRIMARY KEY(rowid) / PostgreSQL: SERIAL or GENERATED ALWAYS AS IDENTITY
+    title       VARCHAR(200) NOT NULL,     -- add()のバリデーション(1〜200文字)に対応
     done        BOOLEAN NOT NULL DEFAULT FALSE,
     created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT chk_title_not_empty CHECK (TRIM(title) <> '')
+    updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- 完了/未完了での絞り込み・並び替えを高速化
-CREATE INDEX idx_todos_done ON todos(done);
-CREATE INDEX idx_todos_created_at ON todos(created_at);
+-- 検索(search)・完了率集計(get_stats)を高速化するインデックス
+CREATE INDEX ix_todos_done ON todos (done);
+CREATE INDEX ix_todos_title ON todos (title);  -- PostgreSQLではpg_trgmでLIKE '%keyword%'高速化も検討可
 ```
 
-PostgreSQL版（IDENTITY列・トリガーで`updated_at`自動更新する場合）:
+**SQLAlchemy 2.0 (async) モデル例:**
 
-```sql
-CREATE TABLE todos (
-    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    title       VARCHAR(200) NOT NULL,
-    done        BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+```python
+from datetime import datetime
+from sqlalchemy import String, Boolean, DateTime, func
+from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase
 
-    CONSTRAINT chk_title_not_empty CHECK (TRIM(title) <> '')
-);
 
-CREATE INDEX idx_todos_done ON todos(done);
+class Base(DeclarativeBase):
+    pass
 
-CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = now();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_todos_updated_at
-    BEFORE UPDATE ON todos
-    FOR EACH ROW
-    EXECUTE FUNCTION set_updated_at();
+class Todo(Base):
+    __tablename__ = "todos"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    done: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
 ```
 
-### カラム設計の補足
-
-- `title`: 既存のバリデーション（1〜200文字、空白のみ不可）をDB制約にも反映。アプリ側のバリデーションは引き続き維持し、DB制約は最終防衛ラインとする
-- `done`: 既存通りBOOLEAN
-- `created_at` / `updated_at`: Webアプリでは「いつ作られたか」「いつ更新されたか」がソート・監査・UI表示に必須になるため追加
-- 将来の拡張候補（今回は見送り、必要になれば追加）:
-  - `user_id`（複数ユーザー対応時の所有者カラム、`users`テーブルへの外部キー）
-  - `due_date`（期限）
-  - `priority`（優先度）
-
----
+- `title`の200文字制約・空文字禁止は既存の `add()` バリデーションと同じ制約をDB側にも反映（アプリ層のバリデーションは維持しつつDB側でも保証）。
+- `id`はSQLite/PostgreSQL双方でORMの自動採番に任せる形にし、`next_id`を手動管理する現行方式から脱却する（DBのAUTO INCREMENT/IDENTITYに委譲）。
+- 将来の複数ユーザー対応が必要になった場合は `user_id`（FK）と複合インデックス `(user_id, done)` を追加する拡張ポイントとして想定しておく（現時点では実装しない）。
 
 ## 5. マイグレーション方針
 
-### 5.1 既存JSONデータからの移行
+- **ツール**: [Alembic](https://alembic.sqlalchemy.org/) を採用する。SQLAlchemyと親和性が高く、SQLite/PostgreSQL両方をサポートし、2026年時点でもFastAPI + SQLAlchemy構成のデファクトスタンダード。
+- **構成**:
+  - `alembic/env.py` でDB接続先を環境変数(`DATABASE_URL`)から取得し、開発（SQLite）・本番（PostgreSQL）で同一のマイグレーションスクリプトを共有する。
+  - 非同期エンジンを使う場合は `env.py` 内で `run_sync` を使い同期的にマイグレーションを実行する構成にする（Alembic自体は同期実行が基本）。
+- **運用フロー**:
+  1. モデル変更後に `uv run alembic revision --autogenerate -m "説明"` でマイグレーションスクリプトを生成。
+  2. 生成されたスクリプトを目視レビュー（autogenerateは列のリネームやSQLite特有の制約変更を誤検知することがあるため必須）。
+  3. `uv run alembic upgrade head` をローカル（SQLite）・CI・本番（PostgreSQL）それぞれで適用。
+  4. 既存の `todos.json` からのデータ移行は、初回マイグレーション後に一度限りの移行スクリプト（JSON読み込み→INSERT）を別途用意する。
+- **SQLite特有の注意**: SQLiteは`ALTER TABLE`の制約変更（列の型変更・NOT NULL追加など）が限定的なため、Alembicは内部的に「新テーブル作成→データコピー→リネーム」のbatch modeで対応する。`env.py`で `render_as_batch=True` を設定すること。
 
-`todos.json` の `{"todos": [...], "next_id": ...}` 構造から、以下の手順でDBに取り込む。
+## 6. まとめ
 
-1. JSONを読み込み、各todoの `id`, `title`, `done` をそのままINSERT
-2. `created_at` / `updated_at` は移行時点では元データに存在しないため、移行実行時刻を一律で設定する（過去の作成日時は復元不可能である旨を許容する）
-3. SQLiteの場合、`AUTOINCREMENT`のシーケンスを既存の `next_id - 1` まで進めておくことで、移行後も既存IDと衝突しない新規Todoを発行できる
-   - SQLite: `INSERT INTO sqlite_sequence (name, seq) VALUES ('todos', <next_id - 1>);`（明示的に行を入れる、または最大IDのレコードを先に入れれば自動的にseqが追従する）
-   - PostgreSQL: `SELECT setval(pg_get_serial_sequence('todos', 'id'), <next_id - 1>);`
+- 開発・CIはSQLite、本番はPostgreSQLという構成が2026年時点でも標準的かつ最もコストパフォーマンスが良い。
+- SQLAlchemy 2.0（async対応）+ Alembicの組み合わせがFastAPIとの統合実績・エコシステムの成熟度で最有力。
+- スキーマは既存の `id/title/done` を踏襲しつつ、`created_at`/`updated_at`を追加した最小限の拡張に留め、将来のユーザー管理拡張は現時点で実装しない（YAGNI）。
 
-移行用ワンショットスクリプト例（`uv run python` で実行する想定、本番反映前にバックアップ必須）:
-
-```python
-# scripts/migrate_json_to_db.py
-import json
-import sqlite3
-
-def migrate(json_path: str, db_path: str) -> None:
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    conn = sqlite3.connect(db_path)
-    conn.executemany(
-        "INSERT INTO todos (id, title, done) VALUES (?, ?, ?)",
-        [(t["id"], t["title"], t["done"]) for t in data["todos"]],
-    )
-    conn.commit()
-    conn.close()
-```
-
-### 5.2 スキーマバージョン管理（Alembic）
-
-スキーマ自体の変更管理には **Alembic** の利用を推奨する。
-
-- SQLAlchemyと組み合わせれば、SQLite/PostgreSQL双方に同一のマイグレーションスクリプトを適用できる（方言差はAlembicがある程度吸収する）
-- 将来的なカラム追加（`due_date`等）やインデックス変更を、コードレビュー可能な形でバージョン管理できる
-- 初期テーブル作成自体も最初のAlembicリビジョンとして記述し、JSONからのデータ移行は別途データ移行用スクリプト（上記5.1）として分離する（Alembicのマイグレーションにビジネスデータの移行ロジックを混在させると、スキーマ変更とデータ移行の責務が曖昧になるため）
-
-導入コマンド例:
-
-```bash
-uv add alembic sqlalchemy
-uv run alembic init alembic
-```
-
-学習段階で素早く反復したいだけであれば、最初は手書きの `CREATE TABLE` スクリプト（本レポート4節のSQL）で十分であり、スキーマ変更の頻度が増えてきた時点でAlembic導入を検討すればよい。
+Sources:
+- [SQL (Relational) Databases - FastAPI](https://fastapi.tiangolo.com/tutorial/sql-databases/)
+- [How to Use SQLAlchemy with FastAPI](https://oneuptime.com/blog/post/2026-01-27-sqlalchemy-fastapi/view)
+- [Using Alembic With FastAPI and PostgreSQL — No Bullshit Guide](https://medium.com/@rajeshpachaikani/using-alembic-with-fastapi-and-postgresql-no-bullshit-guide-b564ae89f4be)
+- [Alembic for FastAPI and SQLAlchemy: The Complete Guide to Database Migrations](https://medium.com/@vamshimohan.b/alembic-for-fastapi-and-sqlalchemy-the-complete-guide-to-database-migrations-with-real-examples-c4b167d8b2bd)
+- [FastAPI with Async SQLAlchemy, SQLModel, and Alembic | TestDriven.io](https://testdriven.io/blog/fastapi-sqlmodel/)
