@@ -1,107 +1,108 @@
-# デプロイ戦略調査レポート
+# デプロイ戦略調査レポート：Todoアプリのコンテナ化とクラウドデプロイ
 
-## 前提の確認
+## 1. 調査の目的
 
-現状の `src/todo.py` は `TodoList` クラス単体で、永続化は JSON ファイル（`todos.json`）への直接読み書きのみ。`pyproject.toml` にはまだ FastAPI・uvicorn が入っておらず、CLAUDE.md のロードマップ通り「FastAPI + uv」構成へ拡張する前提で本レポートを作成する。
-
-**重要な制約**：JSON ファイル永続化はコンテナのローカルファイルシステムに書き込む方式のため、Render / Railway のようなコンテナ型 PaaS では **再デプロイやスケールでファイルが消える**（永続ディスクをアタッチしない限り）。本番運用するなら、DB 移行（`docs/research/database_design.md` 側の検討事項）か、有料の永続ボリュームの追加が事実上必須になる。この点は「推奨構成」で改めて触れる。
+本プロジェクト（FastAPI + uv構成のTodoアプリ）を本格的なWebアプリへ拡張するにあたり、Docker化の方法と、Render・Railway・Fly.ioを中心としたクラウドサービスへのデプロイ方法について、コスト・難易度・CI/CD連携の観点から調査した（2026年7月時点の情報）。
 
 ---
 
-## 1. Dockerfile例（uvベース・マルチステージ）
+## 2. Docker化の方法
 
-Astral 公式の `uv` Docker ガイド（[docs.astral.sh/uv/guides/integration/docker](https://docs.astral.sh/uv/guides/integration/docker/)）の推奨パターンに、非rootユーザー化とヘルスチェックを加えたもの。
+### 2.1 基本方針
+
+FastAPI公式ドキュメントおよびuv公式ガイドでは、以下の構成が推奨されている。
+
+- **マルチステージビルド**：ビルド用ステージと実行用ステージを分離し、イメージサイズを削減
+- **uvの活用**：`ghcr.io/astral-sh/uv` の公式イメージから `uv` バイナリのみをコピーし、`uv sync --frozen` で依存関係を再現性高くインストール
+- **非rootユーザーでの実行**：セキュリティ強化のためコンテナ内で専用ユーザーを作成して実行
+- **HEALTHCHECK命令**：コンテナのヘルスチェックエンドポイント（例：`/health`）を用意し、Docker/オーケストレータが死活監視できるようにする
+- **exec形式でのCMD**：`uvicorn`のグレースフルシャットダウンとlifespanイベントを正しく機能させるため、シェル形式ではなくexec形式で起動コマンドを記述する
+
+### 2.2 Dockerfileの例（本プロジェクト向け）
 
 ```dockerfile
-# syntax=docker/dockerfile:1
-
-# ---------- ビルドステージ ----------
+# ---- ビルドステージ ----
 FROM python:3.14-slim AS builder
-
-# uv公式イメージからバイナリだけを取得（distrolessイメージを利用）
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=0
-
 WORKDIR /app
-
-# 依存関係の定義ファイルだけ先にコピーしてキャッシュを効かせる
-# （src/ を変更してもここは再実行されない）
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project --no-dev
+RUN uv sync --frozen --no-cache --no-dev
 
-# アプリ本体をコピーしてプロジェクト自体をインストール
-COPY src/ ./src/
-RUN uv sync --frozen --no-dev
-
-# ---------- 実行ステージ ----------
-FROM python:3.14-slim AS runtime
-
-# 非rootユーザーで実行する
-RUN groupadd --system app && useradd --system --gid app --home /app app
+# ---- 実行ステージ ----
+FROM python:3.14-slim
+RUN useradd --create-home appuser
 WORKDIR /app
-
-# ビルドステージから仮想環境とアプリコードだけをコピー（ビルドツールは持ち込まない）
-COPY --from=builder --chown=app:app /app/.venv /app/.venv
-COPY --from=builder --chown=app:app /app/src /app/src
-
+COPY --from=builder /app/.venv /app/.venv
+COPY src/ ./src/
+USER appuser
 ENV PATH="/app/.venv/bin:$PATH"
-USER app
-
-EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
-
+HEALTHCHECK --interval=30s --timeout=3s CMD curl -f http://localhost:8000/health || exit 1
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-`.dockerignore`（イメージ肥大化・キャッシュ無効化防止）:
+依存関係のコピーとインストールをアプリコードのコピーより前に行うことで、コード変更時にDockerのレイヤーキャッシュが効き、ビルド時間を短縮できる。
 
-```
-.venv
-__pycache__
-*.pyc
-.git
-.pytest_cache
-tests/
-docs/
-todos.json
-.env
-```
+### 2.3 docker-compose（ローカル開発用）
 
-**ポイント**（[uv公式ガイド](https://docs.astral.sh/uv/guides/integration/docker/)、[Depot: Optimal Dockerfile for uv](https://depot.dev/docs/container-builds/optimal-dockerfiles/python-uv-dockerfile)より）
-- `--no-install-project` で依存関係だけを先にインストールし、レイヤーキャッシュを最大化する（`src/` 変更時に `uv sync` を丸ごとやり直さない）。
-- マルチステージ化で最終イメージにビルドツール（uv本体、コンパイラ類）を含めない。実測でシングルステージ比 60〜80% のサイズ削減が報告されている（[collabnix](https://collabnix.com/docker-multi-stage-builds-for-python-developers-a-complete-guide/)）。
-- `python:3.14-slim` を採用（`python:3.14` 無印は800MB前後大きい）。
-- 非rootユーザー実行とヘルスチェックは、Render/Railway がヘルスチェックエンドポイントを見てデプロイ成功判定するため必須級。
+DB（PostgreSQL等）を導入する場合は `docker-compose.yml` でアプリとDBをまとめて起動する構成が定番。本番のRender/RailwayではマネージドDBを使うため、compose環境はあくまでローカル検証用として位置づけるのが良い。
 
 ---
 
-## 2. クラウドサービス比較表
+## 3. クラウドサービス比較
 
-| 項目 | Render | Railway | 参考: Fly.io |
+### 3.1 Render
+
+| 項目 | 内容 |
+|---|---|
+| 無料枠 | Web Service 750時間/月、100GB送信帯域、ビルド500分/月。ただし15分アイドルでスリープし、コールドスタートに30〜60秒かかる |
+| 有料プラン | Starter $7/月（常時稼働・共有CPU）、Standard $25/月、Pro $85/月〜（専有CPU） |
+| 難易度 | 低い。GitHubリポジトリ連携＋`render.yaml`（Infrastructure as Code）または管理画面のみで、Dockerfileを検出して自動ビルド・デプロイ可能 |
+| CI/CD | GitHubへのpushで自動デプロイ（Auto Deploy）が標準機能。PRごとのプレビュー環境も対応 |
+| DB | Render Postgresをマネージドサービスとして提供（無料枠あり、期限付き） |
+
+### 3.2 Railway
+
+| 項目 | 内容 |
+|---|---|
+| 無料枠 | クレジットカード不要のTrialプランで$5分の一回限りクレジット |
+| 有料プラン | Hobby $5/月（$5分の利用クレジット込み、使用量に応じた従量課金）、Pro $20/月〜 |
+| 難易度 | 非常に低い。GitHub連携でDockerfileまたはNixpacks（自動言語検出）によりビルド。設定はほぼGUIで完結 |
+| CI/CD | pushで自動デプロイ。環境ごとのブランチデプロイやRailway CLIによるCI連携も容易 |
+| DB | PostgreSQL/MySQL/Redis等をワンクリックでプロビジョニング可能、同一プロジェクト内で環境変数が自動連携される |
+
+### 3.3 Fly.io
+
+| 項目 | 内容 |
+|---|---|
+| 無料枠 | **2024年に恒常無料枠を廃止済み**。新規アカウントは$5分のトライアルクレジットのみで、Machineはアイドル5分で自動停止する評価用途向け。2026年時点で永続無料枠は存在しない |
+| 有料プラン | 従量課金制。最小構成（shared-cpu-1x、256MB RAM）を常時稼働させると約$1.94/月〜。API＋Postgresの一般的な本番構成では$13〜$20/月程度 |
+| 難易度 | 中程度。`flyctl launch`でDockerfileから自動的に`fly.toml`を生成できるが、リージョン・ボリューム・スケーリング設定をCLIやTOMLで明示的に管理する必要があり、Render/Railwayに比べ運用の学習コストがやや高い |
+| CI/CD | GitHub Actions用の公式Action（`flyctl deploy`）が提供されており、pushトリガーのデプロイをワークフローとして自分で組む形になる（Render/RailwayのようなGUI上のネイティブ自動デプロイは無い） |
+| DB | Fly Postgres（自前運用のマネージドPostgresクラスタ）を提供。無料枠は無く、Machine同様に従量課金 |
+| 備考 | エッジロケーションでのグローバル分散配置に強みがあるが、2025年にかけて信頼性に関する指摘も見られる。小規模なTodoアプリ用途では機能過多になりやすい |
+
+### 3.4 比較まとめ
+
+| 観点 | Render | Railway | Fly.io |
 |---|---|---|---|
-| 無料枠 | ワークスペースごと月750時間の無料インスタンス時間。ただしFreeプランのWebサービスは**15分無操作でスピンダウン**し、次リクエストで約1分のコールドスタート（[Render公式記事](https://render.com/articles/platforms-with-a-real-free-tier-for-developers-in-2026)） | 明確な無料枠なし。Hobbyプラン $5/月〜が実質の最小コース（[Railway Docs](https://docs.railway.com/pricing/plans)） | 無料枠は縮小傾向、実質有料前提 |
-| 最小有料コスト | Starter: 約$7/月〜（常時稼働・スピンダウンなし） | Hobby: $5/月（**使用量に応じた従量課金**で、$5分は月額に含まれる。超過分のみ追加課金）（[SaaSPricePulse](https://www.saaspricepulse.com/tools/railway)） | 従量課金、小規模なら数ドル/月 |
-| 課金方式 | 固定プラン＋従量（ディスク/帯域等） | 完全従量制（CPU/RAM/ egress を秒単位で計測）（[makerkit.dev](https://makerkit.dev/pricing-calculator/railway)） | 完全従量制 |
-| Docker対応 | ◎ Dockerfileを直接ビルド、または自動言語検出 | ◎ Dockerfileを直接ビルド、Nixpacksでの自動ビルドも可 | ◎ `fly.toml` + Dockerfile |
-| 永続化（DB/ディスク） | 無料PostgreSQLは1GB・**作成30日で失効**（猶予14日）。永続ディスクは有料プランのみ（[kuberns.com](https://kuberns.com/blogs/render-postgres-pricing-setup-limits/)） | ボリューム（永続ディスク）が標準機能として利用可能、Postgresテンプレートも従量課金で常設 | ボリューム標準対応 |
-| GitHub連携（Auto Deploy） | ◎ リポジトリ接続でpush時に自動デプロイ。`render.yaml`（Blueprint）でIaC管理可 | ◎ リポジトリ接続で自動デプロイ。「Wait for CI」設定でGitHub Actions完了を待って反映可能（[Railway Docs](https://docs.railway.com/deployments/github-autodeploys)） | GitHub Actions経由が基本 |
-| CI/CD連携のしやすさ | Deploy Hook（Secret URLへのGET/POST）でGitHub Actionsから明示トリガー可能。または純粋にGit連携に任せてActionsはテストゲートのみに使う設計も容易（[Render Docs: Deploy Hooks](https://render.com/docs/deploy-hooks)） | 公式CLI（`railway up`）をActionsから叩く方式、または自動デプロイ＋Wait for CI。設定例が豊富（[Railway Blog](https://blog.railway.com/p/github-actions)） | `flyctl deploy` をActionsから実行 |
-| 学習コストの体感難易度 | 低（管理画面がシンプル、ドキュメントも初心者向け） | 低〜中（従量課金の見積もりがやや分かりにくい） | 中（`fly.toml`の理解が必要） |
+| 無料での常時稼働 | 不可（15分アイドルでスリープ） | 不可（トライアルクレジット消費のみ） | 不可（無料枠自体が廃止） |
+| 最安の常時稼働コスト目安 | $7/月（Starter） | 実質$5/月（Hobbyの月額込みクレジット） | 約$2〜/月（最小構成、従量課金） |
+| セットアップの手間 | 低い（GUI＋render.yamlのIaC） | 非常に低い（GUI中心、DB連携が自動） | 中〜高い（CLI・TOML設定が前提） |
+| CI/CD | pushトリガー自動デプロイをネイティブ搭載 | pushトリガー自動デプロイをネイティブ搭載 | GitHub Actions側で`flyctl deploy`を自前で組む |
+| 学習コスト | 低い | 低い | やや高い（リージョン・ボリューム等の概念を理解する必要） |
+
+- **コスト**：小規模なTodoアプリ用途であれば、RailwayのHobbyプラン（$5/月）が常時稼働・従量課金で予測しやすい。Fly.ioは最小構成なら$2/月程度からと理論上は最安だが、無料枠が無く従量課金の見積もりに慣れが必要。Renderは無料枠があるが、スリープ・コールドスタートがあるため常時稼働を求めるならStarter以上（$7/月〜）が必要。
+- **難易度**：Render・RailwayはDockerfileを検出して自動ビルドする仕組みがあり学習コストが低い。RailwayはDB連携の環境変数注入が特に簡単。RenderはIaC（render.yaml）による再現性に優れる。Fly.ioはCLI操作とTOML設定への理解が前提となり、学習コースの初期段階（本プロジェクトの想定学習者）にはやや不向き。
+- **CI/CD**：Render・RailwayはGitHub pushトリガーの自動デプロイをネイティブサポートしており、GitHub Actionsは「テスト→ビルド」までに留めることができる。Fly.ioは`flyctl deploy`をGitHub Actionsワークフロー内で明示的に呼び出す必要があり、CI/CD構築の自由度は高い反面、初期設定の手間が増える。
 
 ---
 
-## 3. CI/CD連携方針（GitHub Actions）
+## 4. CI/CD連携の設計案
 
-推奨するのは「**テストゲート＋自動デプロイ**」の2段構成。
+GitHub Actionsで以下のようなワークフローを組み、テストとlintを通過したコードのみが自動デプロイされる構成が望ましい。
 
 ```yaml
-# .github/workflows/ci.yml
 name: CI
-
 on:
   push:
     branches: [main]
@@ -112,51 +113,45 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - name: 依存関係のインストール
-        run: uv sync --frozen
-      - name: テスト実行
-        run: uv run pytest
-      - name: Dockerイメージのビルド検証
-        run: docker build -t todo-app:ci .
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync
+      - run: uv run pytest
 ```
 
-デプロイの起動方法は2パターンあり、プロジェクト規模的には **(A) を推奨**。
-
-- **(A) プラットフォームのGitHub連携に任せる**：Render/Railwayの管理画面でリポジトリを接続し、`main` へのpushで自動デプロイ。CI（上記ワークフロー）は「ブランチ保護ルールでmainへのマージ条件にする」役割に徹する。設定がシンプルで、学習プロジェクトのオーバーヘッドが最小。
-- **(B) CIからデプロイを明示的にトリガーする**：CIジョブの最後に Render の Deploy Hook（`curl -X POST $RENDER_DEPLOY_HOOK_URL`）や Railway CLI（`railway up`）を呼ぶ。テスト成功を厳密なデプロイ条件にしたい場合や、複数環境（staging/production）を使い分けたい場合に有効。Railwayの「Wait for CI」設定を使えば、自動デプロイのままGitHub Actions完了を待たせることも可能。
-
-いずれの場合も `RENDER_DEPLOY_HOOK_URL` / `RAILWAY_TOKEN` は GitHub Secrets に格納する。
+- `main`ブランチへのpushがテストを通過した後、Render/RailwayのGitHub連携が自動的に検知してデプロイを実行する構成であれば、GitHub Actions側にデプロイ処理を持たせる必要がない。
+- より厳密に「テスト成功後のみデプロイ」を保証したい場合は、Render/Railwayの自動デプロイをオフにし、GitHub ActionsからRender/Railwayの Deploy Hook（Webhook URL）やCLI（`railway up`）を呼び出す方式もある。
 
 ---
 
-## 4. 推奨構成とその理由
+## 5. 推奨構成
 
-**推奨: Render（Docker環境、Starterプラン以上）+ GitHub連携による自動デプロイ**
+**コンテナ化：マルチステージDockerfile（uv採用）／デプロイ先：Railway（Hobbyプラン, $5/月）を第一候補、Render（Starter, $7/月〜）を次点とする。Fly.ioは今回は非推奨。**
 
-理由:
-1. **コスト**: 学習・個人プロジェクト規模ではRenderの無料枠（月750時間）で十分試せる。ただしスピンダウンによるコールドスタートが気になる場合、または常時稼働のTodoアプリとして使うならStarter（$7/月〜）で解決する。Railwayも悪くないが、完全従量課金は「動かしっぱなしにすると気づかないうちに増える」タイプのコスト構造で、学習用途では見積もりしやすいRenderの固定プランの方が扱いやすい。
-2. **難易度**: DockerfileさえあればRenderは自動でビルド・デプロイしてくれ、`render.yaml` でインフラ定義をコードとして残せる（IaC）。CLAUDE.mdの「uvで管理・日本語コメント」という開発ルールとも相性がよく、Dockerfile内で完結する。
-3. **CI/CD**: GitHub連携＋Deploy Hookの両方に対応しており、まずは(A)のシンプル運用から始めて、必要になったら(B)の厳密なゲート方式に切り替えられる拡張性がある。
+### 推奨理由
 
-**注意点（要フォローアップ）**:
-- JSON永続化のままでは、RenderのGitデプロイ時にファイルシステムがリセットされるため **Todoデータが消える**。本番運用するなら、①Render無料Postgres（30日失効に注意）へのDB移行、②Renderの永続ディスク追加（有料）のいずれかが必要。`docs/research/database_design.md` の結論と合わせて、FastAPI移行と同時にDB永続化へ切り替えることを強く推奨する。
-- `pyproject.toml` にまだ `fastapi` / `uvicorn` が入っていないため、Web化の初手として `uv add fastapi uvicorn` が必要（CLAUDE.mdのルール通り `pip install` は使わない）。
+1. **コンテナ化はマルチステージ＋uvで確定**：ビルドステージで`uv sync --frozen`により依存関係を再現性高くインストールし、実行ステージには`.venv`とソースのみをコピーする構成（2.2節）はイメージサイズ・ビルド速度・再現性の全てで有利であり、ローカル・CI・本番で同一Dockerfileを使い回せる。非root実行とHEALTHCHECKも本番運用の基本要件として採用する。
+2. **デプロイ先はRailwayを第一候補とする**：
+   - 本プロジェクトは学習用の小規模Todoアプリであり、コストは低く予測可能であることが望ましい。RailwayのHobbyプラン（$5/月固定＋使用量に応じたクレジット消化）は、Render無料枠のようなコールドスタート（30〜60秒）が無く、常時稼働のWebアプリとして体験が安定する。
+   - DB（PostgreSQL等）を追加する際もワンクリックでプロビジョニングでき、環境変数が自動連携されるため、データベース設計担当との統合がスムーズ。
+   - Dockerfileを検出した自動ビルド・GitHub pushトリガーの自動デプロイがネイティブにあり、GitHub Actions側は「テスト＋lint」に専念できる（4節）。
+3. **Renderは次点**：無料枠でまず動作確認をしたい・複数環境（staging/production）をIaC（render.yaml）で厳密に管理したい場合に適する。ただし無料枠はスリープするため、学習過程で「常時アクセスできるデモURL」を維持したいなら最初からStarter（$7/月）を検討する。
+4. **Fly.ioは今回は非推奨**：2024年に恒常無料枠が廃止され、CLI・TOMLベースの設定（リージョン、ボリューム等）を理解する必要があるため、学習コストに対してこの規模のアプリにはオーバースペック。将来的にグローバル分散配置やエッジ配信が必要になった場合の選択肢として留めておく。
+5. **CI/CD**：GitHub ActionsでPRごとに`uv run pytest`を実行し（4節のワークフロー例）、mainブランチへのマージ後はRailway/Renderのpushトリガー自動デプロイを利用する。テスト成功を厳密にデプロイの条件としたい場合は、自動デプロイをオフにしてGitHub ActionsからDeploy Hook／CLIを呼び出す方式に切り替える。
 
 ---
 
 ### Sources
-- [Platforms with a real free tier for developers in 2026 - Render](https://render.com/articles/platforms-with-a-real-free-tier-for-developers-in-2026)
-- [Render Postgres 2026: Pricing, Free Tier Limits](https://kuberns.com/blogs/render-postgres-pricing-setup-limits/)
-- [Render Docs: Deploy Hooks](https://render.com/docs/deploy-hooks)
-- [Railway Pricing Plans](https://docs.railway.com/pricing/plans)
-- [Railway Free Tier 2026 - SaaSPricePulse](https://www.saaspricepulse.com/tools/railway)
-- [Railway Pricing Calculator - makerkit.dev](https://makerkit.dev/pricing-calculator/railway)
-- [Controlling GitHub Autodeploys - Railway Docs](https://docs.railway.com/deployments/github-autodeploys)
-- [Using GitHub Actions with Railway - Railway Blog](https://blog.railway.com/p/github-actions)
-- [Using uv in Docker - Astral](https://docs.astral.sh/uv/guides/integration/docker/)
-- [Optimal Dockerfile for Python with uv - Depot](https://depot.dev/docs/container-builds/optimal-dockerfiles/python-uv-dockerfile)
-- [Docker Multi-Stage Builds for Python Developers - Collabnix](https://collabnix.com/docker-multi-stage-builds-for-python-developers-a-complete-guide/)
+- [Pricing | Render](https://render.com/pricing)
+- [Platforms with a real free tier for developers in 2026](https://render.com/articles/platforms-with-a-real-free-tier-for-developers-in-2026)
+- [Render vs Railway 2026 - Pricing, DX & When to Use Each – Encore](https://encore.dev/articles/render-vs-railway)
+- [Pricing Plans | Railway Docs](https://docs.railway.com/pricing/plans)
+- [Pricing | Railway](https://railway.com/pricing)
+- [Railway vs Render: which platform fits your workload in 2026? | Northflank](https://northflank.com/blog/railway-vs-render)
+- [Pricing · Fly](https://fly.io/pricing/)
+- [Fly.io Resource Pricing · Fly Docs](https://fly.io/docs/about/pricing/)
+- [7 Fly.io Alternatives in 2026: Real Pricing After the Free Tier Died - ExpressTech](https://expresstech.io/7-fly-io-alternatives-in-2026-real-pricing-after-the-free-tier-died/)
+- [Fly.io Free Tier 2026: What's Left After the Cuts? - SaaSPricePulse](https://www.saaspricepulse.com/tools/flyio)
+- [FastAPI in Containers - Docker - FastAPI](https://fastapi.tiangolo.com/deployment/docker/)
+- [Using uv with FastAPI | uv](https://docs.astral.sh/uv/guides/integration/fastapi/)
+- [Docker in Practice #1: Containerizing FastAPI — uv, Multi-stage, non-root](https://schoolofweb.net/en/posts/docker-practice-1/)
+- [FastAPI Docker Best Practices | Better Stack Community](https://betterstack.com/community/guides/scaling-python/fastapi-docker-best-practices/)
